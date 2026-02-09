@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Chat Test</title>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+
+<body>
+  <h2>WebSocket Chat Test</h2>
+
+  <script>
+    const socket = io('http://localhost:3000', {
+      auth: {
+        token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6IlVzZXIyQHRlc3QuY29tIiwic3ViIjozLCJpYXQiOjE3NzAwMTYwMjQsImV4cCI6MTc3MDEwMjQyNH0.gp5wtuAdNUI-gWiW2mJW54dfZ8qV8IG0vYMUqMvieLU',
+      },
+    });
+
+    socket.on('connect', () => {
+      console.log('✅ Connected to server, socket id:', socket.id);
+
+      // join stream room
+      socket.emit('joinStream', 1);
+
+      // send message AFTER connection
+      socket.emit('chatMessage', {
+        streamId: 1,
+        message: 'Hello everyone 👋',
+      });
+    });
+
+    socket.on('chatMessage', (msg) => {
+      console.log('💬 Received:', msg);
+    });
+
+    socket.on('disconnect', () => {
+      console.log('❌ Disconnected');
+    });
+  </script>
+
+</body>
+
+</html>
