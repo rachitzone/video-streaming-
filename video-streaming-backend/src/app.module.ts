@@ -16,7 +16,7 @@ import { ChatModule } from './chat/chat.module';
       host: 'localhost',
       port: 5432,
       username: 'postgres',
-      password: 'postgres',
+      password: 'postgress',
       database: 'videostream',
       autoLoadEntities: true,
       synchronize: true,

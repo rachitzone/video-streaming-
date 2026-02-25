@@ -5,65 +5,102 @@ import Hls from "hls.js";
 import { io } from "socket.io-client";
 import { jwtDecode } from "jwt-decode";
 
-const SOCKET_URL = "http://localhost:3000";
-const HLS_BASE = "http://localhost:8080/live";
+const SOCKET_URL = "http://192.168.0.101:3000";
+const HLS_BASE = "http://192.168.0.101:8080/live";
 
 export default function Watch() {
   const { id } = useParams();
   const videoRef = useRef(null);
   const socketRef = useRef(null);
-  const muteTimerRef = useRef(null);
+  const hlsRef = useRef(null);
 
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [viewerCount, setViewerCount] = useState(0);
 
-  const [muted, setMuted] = useState(false);
-  const [muteSeconds, setMuteSeconds] = useState(0);
-
   const token = localStorage.getItem("token");
-  const user = token ? jwtDecode(token) : null;
-  const isAdmin = user?.role === "ADMIN";
 
-  /* =======================
-     INIT
-  ======================= */
+  // Guest handling
+  let guestId = localStorage.getItem("guestId");
+  if (!token && !guestId) {
+    guestId = crypto.randomUUID();
+    localStorage.setItem("guestId", guestId);
+  }
+
+  const user = token ? jwtDecode(token) : null;
+
   useEffect(() => {
     loadStream();
     initSocket();
 
     return () => {
       socketRef.current?.disconnect();
-      socketRef.current = null;
-      clearInterval(muteTimerRef.current);
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* =======================
-     VIDEO
-  ======================= */
   async function loadStream() {
     const res = await api.get(`/stream/${id}`);
     const hlsUrl = `${HLS_BASE}/${res.data.stream_key}.m3u8`;
 
+    const video = videoRef.current;
+    if (!video) return;
+
+    video.playsInline = true;
+    video.muted = false;
+
     if (Hls.isSupported()) {
-      const hls = new Hls();
+      const hls = new Hls({
+        lowLatencyMode: true,
+
+        // 🔥 Stable LL-HLS settings
+        liveSyncDurationCount: 3,
+        liveMaxLatencyDurationCount: 6,
+
+        maxBufferLength: 15,
+        maxMaxBufferLength: 30,
+
+        enableWorker: true,
+      });
+
+      hlsRef.current = hls;
+
       hls.loadSource(hlsUrl);
-      hls.attachMedia(videoRef.current);
-    } else {
-      videoRef.current.src = hlsUrl;
+      hls.attachMedia(video);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.play().catch(() => {});
+      });
+
+      // Error recovery only
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) {
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            hls.startLoad();
+          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            hls.recoverMediaError();
+          } else {
+            hls.destroy();
+          }
+        }
+      });
+
+    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = hlsUrl;
+      video.addEventListener("loadedmetadata", () => {
+        video.play().catch(() => {});
+      });
     }
   }
 
-  /* =======================
-     SOCKET
-  ======================= */
   function initSocket() {
-    if (socketRef.current) return;
-
     socketRef.current = io(SOCKET_URL, {
-      auth: { token },
+      auth: {
+        token: token || null,
+        guestId: guestId || null,
+      },
     });
 
     socketRef.current.on("connect", () => {
@@ -76,50 +113,19 @@ export default function Watch() {
       setMessages((prev) => [...prev, msg]);
     });
 
-    // 🔄 message updated (delete → inline replace)
     socketRef.current.on("chatMessageUpdated", ({ messageId }) => {
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === messageId ? { ...m } : m
+          m.id === messageId ? { ...m, deleted: true } : m
         )
       );
     });
 
     socketRef.current.on("viewerCount", setViewerCount);
-
-    /* 🔇 YOU ARE MUTED */
-    socketRef.current.on("youAreMuted", ({ secondsLeft }) => {
-      setMuted(true);
-      setMuteSeconds(secondsLeft);
-
-      clearInterval(muteTimerRef.current);
-      muteTimerRef.current = setInterval(() => {
-        setMuteSeconds((s) => {
-          if (s <= 1) {
-            clearInterval(muteTimerRef.current);
-            setMuted(false);
-            return 0;
-          }
-          return s - 1;
-        });
-      }, 1000);
-    });
-
-    /* 🔓 YOU ARE UNMUTED */
-    socketRef.current.on("userUnmuted", ({ userId }) => {
-      if (userId === user?.sub) {
-        setMuted(false);
-        setMuteSeconds(0);
-        clearInterval(muteTimerRef.current);
-      }
-    });
   }
 
-  /* =======================
-     CHAT ACTIONS
-  ======================= */
   function send() {
-    if (muted || !input.trim()) return;
+    if (!input.trim()) return;
 
     socketRef.current.emit("chatMessage", {
       streamId: Number(id),
@@ -129,46 +135,22 @@ export default function Watch() {
     setInput("");
   }
 
-  function deleteMsg(messageId) {
-    if (!isAdmin) return;
-
-    socketRef.current.emit("adminDeleteMessage", {
-      streamId: Number(id),
-      messageId,
-    });
-  }
-
-  function muteUser(userId) {
-    if (!isAdmin) return;
-
-    socketRef.current.emit("adminMuteUser", {
-      streamId: Number(id),
-      userId,
-      duration: 300,
-    });
-  }
-
-  /* =======================
-     UI
-  ======================= */
   return (
-    <div className="h-screen flex bg-neutral-950 text-white">
-      {/* VIDEO */}
-      <div className="flex-1 flex items-center justify-center">
-        <video ref={videoRef} controls autoPlay className="w-full h-full" />
+    <div className="min-h-screen flex flex-col md:flex-row bg-neutral-950 text-white">
+      <div className="w-full md:flex-1 flex items-center justify-center bg-black">
+        <video
+          ref={videoRef}
+          controls
+          autoPlay
+          playsInline
+          className="w-full md:h-full object-contain"
+        />
       </div>
 
-      {/* CHAT */}
-      <div className="w-[400px] border-l border-neutral-800 flex flex-col">
+      <div className="w-full md:w-[400px] border-t md:border-l border-neutral-800 flex flex-col">
         <div className="p-3 border-b border-neutral-800">
           👁 {viewerCount} watching
         </div>
-
-        {muted && (
-          <div className="bg-red-500/10 text-red-400 text-xs p-2 text-center">
-            You are muted ({muteSeconds}s)
-          </div>
-        )}
 
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
           {messages.map((m) => (
@@ -180,63 +162,33 @@ export default function Watch() {
                   : "bg-neutral-900"
               }`}
             >
-              <div className="flex justify-between gap-2">
-                <span>
-                  <b
-                    className={
-                      m.role === "ADMIN"
-                        ? "text-red-400"
-                        : "text-blue-400"
-                    }
-                  >
-                    {m.deleted
-                      ? m.userId === user?.sub
-                        ? "You"
-                        : m.user
-                      : m.user}
-                  </b>
-                  : {m.message}
-                </span>
-
-                {isAdmin && !m.deleted && (
-                  <div className="flex gap-2 text-xs">
-                    <button
-                      onClick={() => deleteMsg(m.id)}
-                      className="text-red-400"
-                    >
-                      ❌
-                    </button>
-                    <button
-                      onClick={() => muteUser(m.userId)}
-                      className="text-yellow-400"
-                    >
-                      🔇
-                    </button>
-                  </div>
-                )}
-              </div>
+              <b
+                className={
+                  m.role === "ADMIN"
+                    ? "text-red-400"
+                    : m.role === "GUEST"
+                    ? "text-green-400"
+                    : "text-blue-400"
+                }
+              >
+                {m.user}
+              </b>
+              : {m.message}
             </div>
           ))}
         </div>
 
-        {/* INPUT */}
         <div className="p-2 flex gap-2 border-t border-neutral-800">
           <input
             value={input}
-            disabled={muted}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={muted ? "You are muted…" : "Type a message"}
-            className={`flex-1 px-3 py-2 rounded ${
-              muted ? "bg-neutral-700" : "bg-neutral-800"
-            }`}
+            placeholder="Type a message"
+            className="flex-1 px-3 py-2 rounded bg-neutral-800"
             onKeyDown={(e) => e.key === "Enter" && send()}
           />
           <button
             onClick={send}
-            disabled={muted}
-            className={`px-4 rounded ${
-              muted ? "bg-gray-600" : "bg-blue-500"
-            }`}
+            className="px-4 rounded bg-blue-500"
           >
             Send
           </button>

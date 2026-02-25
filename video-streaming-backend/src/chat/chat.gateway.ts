@@ -12,25 +12,29 @@ import * as jwt from 'jsonwebtoken';
 import Redis from 'ioredis';
 import { randomUUID } from 'crypto';
 
-/* ======================
-   TYPES
-====================== */
 interface JwtUserPayload {
   email: string;
   sub: number;
   role: 'ADMIN' | 'USER';
 }
 
-function isJwtUserPayload(payload: any): payload is JwtUserPayload {
-  return (
-    payload &&
-    typeof payload.email === 'string' &&
-    typeof payload.sub === 'number' &&
-    (payload.role === 'ADMIN' || payload.role === 'USER')
-  );
+interface ConnectedUser {
+  type: 'user' | 'guest';
+  email?: string;
+  sub?: number;
+  role?: 'ADMIN' | 'USER';
+  guestId?: string;
+  name?: string;
 }
 
-@WebSocketGateway({ cors: { origin: '*' } })
+@WebSocketGateway({
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+    credentials: true,
+  },
+  transports: ['websocket', 'polling'],
+})
 export class ChatGateway
   implements OnGatewayConnection, OnGatewayDisconnect
 {
@@ -38,8 +42,7 @@ export class ChatGateway
   server: Server;
 
   constructor(
-    @Inject('REDIS_CLIENT')
-    private readonly redis: Redis,
+    @Inject('REDIS_CLIENT') private readonly redis: Redis,
     private readonly configService: ConfigService,
   ) {}
 
@@ -49,22 +52,38 @@ export class ChatGateway
   handleConnection(client: Socket) {
     try {
       const token = client.handshake.auth?.token;
-      if (!token) return client.disconnect();
 
-      const secret = this.configService.get<string>('JWT_SECRET');
-      if (!secret) {
-        throw new Error('JWT_SECRET missing');
+      if (token) {
+        const secret = this.configService.get<string>('JWT_SECRET');
+        if (!secret) throw new Error('JWT_SECRET missing');
+
+        const decoded = jwt.verify(token, secret) as any;
+
+        const user: ConnectedUser = {
+          type: 'user',
+          email: decoded.email,
+          sub: decoded.sub,
+          role: decoded.role,
+        };
+
+        client.data.user = user;
+        console.log('✅ User connected:', decoded.email);
+      } else {
+        // 🔥 GUEST MODE
+        const guestId =
+          client.handshake.auth?.guestId || randomUUID();
+
+        const guest: ConnectedUser = {
+          type: 'guest',
+          guestId,
+          name: `Guest_${guestId.slice(0, 5)}`,
+        };
+
+        client.data.user = guest;
+        console.log('👤 Guest connected:', guestId);
       }
-
-      const decoded = jwt.verify(token, secret);
-      if (!isJwtUserPayload(decoded)) {
-        throw new Error('Invalid JWT payload');
-      }
-
-      client.data.user = decoded;
-      console.log('✅ WS connected:', decoded.email);
-    } catch (e: any) {
-      console.log('❌ WS auth failed:', e.message);
+    } catch (e) {
+      console.log('❌ WS auth failed');
       client.disconnect();
     }
   }
@@ -74,13 +93,19 @@ export class ChatGateway
   ====================== */
   async handleDisconnect(client: Socket) {
     const streamId = client.data.streamId;
-    const user = client.data.user as JwtUserPayload | undefined;
-    if (!streamId || !user) return;
+    if (!streamId) return;
 
     const viewerKey = `stream:viewers:${streamId}`;
-    await this.redis.srem(viewerKey, user.sub.toString());
+    const user: ConnectedUser = client.data.user;
 
+    const viewerId =
+      user.type === 'user' ? user.sub : user.guestId;
+
+    if (!viewerId) return;
+
+    await this.redis.srem(viewerKey, viewerId.toString());
     const count = await this.redis.scard(viewerKey);
+
     this.server.to(`stream-${streamId}`).emit('viewerCount', count);
   }
 
@@ -89,18 +114,21 @@ export class ChatGateway
   ====================== */
   @SubscribeMessage('joinStream')
   async joinStream(client: Socket, streamId: number) {
-    const user = client.data.user as JwtUserPayload;
-    if (!user) return;
-
     client.join(`stream-${streamId}`);
     client.data.streamId = streamId;
 
     const viewerKey = `stream:viewers:${streamId}`;
-    await this.redis.sadd(viewerKey, user.sub.toString());
+    const user: ConnectedUser = client.data.user;
 
-    this.server
-      .to(`stream-${streamId}`)
-      .emit('viewerCount', await this.redis.scard(viewerKey));
+    const viewerId =
+      user.type === 'user' ? user.sub : user.guestId;
+
+    if (!viewerId) return;
+
+    await this.redis.sadd(viewerKey, viewerId.toString());
+    const count = await this.redis.scard(viewerKey);
+
+    this.server.to(`stream-${streamId}`).emit('viewerCount', count);
 
     const history = await this.redis.lrange(
       `livechat:stream:${streamId}`,
@@ -122,21 +150,22 @@ export class ChatGateway
     client: Socket,
     data: { streamId: number; message: string },
   ) {
-    const user = client.data.user as JwtUserPayload;
-
-    const muteKey = `chat:mute:stream:${data.streamId}:user:${user.sub}`;
-    const ttl = await this.redis.ttl(muteKey);
-
-    if (ttl > 0) {
-      client.emit('youAreMuted', { secondsLeft: ttl });
-      return;
-    }
+    const user: ConnectedUser = client.data.user;
 
     const chat = {
       id: randomUUID(),
-      user: user.email,
-      userId: user.sub,
-      role: user.role,
+      user:
+        user.type === 'user'
+          ? user.email
+          : user.name,
+      userId:
+        user.type === 'user'
+          ? user.sub
+          : user.guestId,
+      role:
+        user.type === 'user'
+          ? user.role
+          : 'GUEST',
       message: data.message,
       time: new Date().toISOString(),
       deleted: false,
@@ -146,32 +175,33 @@ export class ChatGateway
     await this.redis.lpush(key, JSON.stringify(chat));
     await this.redis.ltrim(key, 0, 99);
 
-    this.server.to(`stream-${data.streamId}`).emit('chatMessage', chat);
+    this.server
+      .to(`stream-${data.streamId}`)
+      .emit('chatMessage', chat);
   }
 
   /* ======================
-     ADMIN: DELETE MESSAGE
+     ADMIN DELETE
   ====================== */
   @SubscribeMessage('adminDeleteMessage')
   async deleteMessage(
     client: Socket,
     data: { streamId: number; messageId: string },
   ) {
-    const admin = client.data.user as JwtUserPayload;
-    if (admin.role !== 'ADMIN') return;
+    const user: ConnectedUser = client.data.user;
+
+    if (user.type !== 'user' || user.role !== 'ADMIN') return;
 
     const key = `livechat:stream:${data.streamId}`;
     const messages = await this.redis.lrange(key, 0, -1);
 
     const updated = messages.map((m) => {
       const msg = JSON.parse(m);
+
       if (msg.id !== data.messageId) return m;
 
       msg.deleted = true;
-      msg.message =
-        msg.userId === admin.sub
-          ? 'You deleted your message'
-          : 'This message was deleted';
+      msg.message = 'This message was deleted';
 
       return JSON.stringify(msg);
     });
@@ -181,42 +211,8 @@ export class ChatGateway
 
     this.server
       .to(`stream-${data.streamId}`)
-      .emit('chatMessageDeleted', { messageId: data.messageId });
-  }
-
-  /* ======================
-     ADMIN: MUTE / UNMUTE
-  ====================== */
-  @SubscribeMessage('adminMuteUser')
-  async muteUser(
-    client: Socket,
-    data: { streamId: number; userId: number; duration: number },
-  ) {
-    const admin = client.data.user as JwtUserPayload;
-    if (admin.role !== 'ADMIN') return;
-
-    const key = `chat:mute:stream:${data.streamId}:user:${data.userId}`;
-    await this.redis.set(key, '1', 'EX', data.duration);
-
-    this.server.to(`stream-${data.streamId}`).emit('userMuted', {
-      userId: data.userId,
-      duration: data.duration,
-    });
-  }
-
-  @SubscribeMessage('adminUnmuteUser')
-  async unmuteUser(
-    client: Socket,
-    data: { streamId: number; userId: number },
-  ) {
-    const admin = client.data.user as JwtUserPayload;
-    if (admin.role !== 'ADMIN') return;
-
-    const key = `chat:mute:stream:${data.streamId}:user:${data.userId}`;
-    await this.redis.del(key);
-
-    this.server.to(`stream-${data.streamId}`).emit('youAreUnmuted', {
-      userId: data.userId,
-    });
+      .emit('chatMessageUpdated', {
+        messageId: data.messageId,
+      });
   }
 }
