@@ -7,6 +7,7 @@ import {
   Req,
   ForbiddenException,
   Param,
+  ParseIntPipe,
 } from '@nestjs/common';
 
 import { StreamsService } from './streams.service';
@@ -16,61 +17,103 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 export class StreamsController {
   constructor(private readonly streamsService: StreamsService) {}
 
-  // 🔐 CREATE STREAM (ADMIN ONLY)
+  /* ======================
+     CREATE STREAM (ADMIN)
+  ====================== */
   @UseGuards(JwtAuthGuard)
   @Post('create')
-  async createStream(@Body() body: { title: string }, @Req() req: any) {
+  async createStream(
+    @Body() body: { title: string },
+    @Req() req: any,
+  ) {
     const user = req.user;
 
     if (!user || user.role !== 'ADMIN') {
-      throw new ForbiddenException('Only admin can create streams');
+      throw new ForbiddenException(
+        'Only admin can create streams',
+      );
     }
 
-    return this.streamsService.createStream(user.sub, body.title);
+    return this.streamsService.createStream(
+      user.sub,
+      body.title,
+    );
   }
 
-  // 🔐 LIST ADMIN STREAMS
+  /* ======================
+     ADMIN STREAM LIST
+  ====================== */
   @UseGuards(JwtAuthGuard)
   @Get('my')
   getMyStreams(@Req() req: any) {
     if (req.user.role !== 'ADMIN') {
-      throw new ForbiddenException('Only admin can view own streams');
+      throw new ForbiddenException(
+        'Only admin can view own streams',
+      );
     }
 
-    return this.streamsService.getStreamsByHost(req.user.sub);
+    return this.streamsService.getStreamsByHost(
+      req.user.sub,
+    );
   }
 
-  // 🔐 START STREAM (ADMIN ONLY)
+  /* ======================
+     START STREAM
+  ====================== */
   @UseGuards(JwtAuthGuard)
   @Post('start/:id')
-  start(@Req() req: any, @Param('id') id: number) {
+  start(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
     if (req.user.role !== 'ADMIN') {
-      throw new ForbiddenException('Only admin can start stream');
+      throw new ForbiddenException(
+        'Only admin can start stream',
+      );
     }
 
-    return this.streamsService.startStream(id, req.user);
+    return this.streamsService.startStream(
+      id,
+      req.user,
+    );
   }
 
-  // 🔐 END STREAM (ADMIN ONLY)
+  /* ======================
+     STOP STREAM
+  ====================== */
   @UseGuards(JwtAuthGuard)
   @Post('stop/:id')
-  stop(@Req() req: any, @Param('id') id: number) {
+  stop(
+    @Req() req: any,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
     if (req.user.role !== 'ADMIN') {
-      throw new ForbiddenException('Only admin can stop stream');
+      throw new ForbiddenException(
+        'Only admin can stop stream',
+      );
     }
 
-    return this.streamsService.endStream(id, req.user);
+    return this.streamsService.endStream(
+      id,
+      req.user,
+    );
   }
 
-  // 🌍 PUBLIC – LIST LIVE STREAMS
+  /* ======================
+     PUBLIC – LIVE STREAMS
+  ====================== */
   @Get()
   getLiveStreams() {
     return this.streamsService.getLiveStreams();
   }
 
-  // 🌍 PUBLIC – GET STREAM INFO
+  /* ======================
+     PUBLIC – STREAM BY ID
+  ====================== */
   @Get(':id')
-  get(@Param('id') id: number) {
+  get(
+    @Param('id', ParseIntPipe) id: number,
+  ) {
     return this.streamsService.getStream(id);
   }
 }

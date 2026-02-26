@@ -6,18 +6,19 @@ import Watch from "./pages/Watch";
 import ProtectedRoute from "./router/ProtectedRoute";
 import Register from "./pages/Register";
 
-
-
-<Route path="/register" element={<Register />} />;
-
 export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-      
-        <Route path="/register" element={<Register />} />
+
+        {/* DEFAULT */}
         <Route path="/" element={<Navigate to="/login" />} />
+
+        {/* AUTH */}
         <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
+
+        {/* ADMIN ONLY */}
         <Route
           path="/admin"
           element={
@@ -26,26 +27,23 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        <Route
-          path="/streams"
-          element={
-            <ProtectedRoute>
-              <Streams />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/watch/:id"
-          element={
-            <ProtectedRoute>
-              <Watch />
-            </ProtectedRoute>
-          }
-        />
+
+        {/* PUBLIC STREAM LIST (Guest allowed) */}
+        <Route path="/streams" element={<Streams />} />
+
+        {/* PUBLIC WATCH (Guest allowed) */}
+        <Route path="/watch/:id" element={<Watch />} />
+
+        {/* 404 */}
         <Route
           path="*"
-          element={<h1 className="text-white">404 Not Found</h1>}
+          element={
+            <div className="min-h-screen flex items-center justify-center bg-black text-white text-2xl">
+              404 Not Found
+            </div>
+          }
         />
+
       </Routes>
     </BrowserRouter>
   );
