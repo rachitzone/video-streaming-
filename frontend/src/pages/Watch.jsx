@@ -5,8 +5,8 @@ import Hls from "hls.js";
 import { io } from "socket.io-client";
 import { jwtDecode } from "jwt-decode";
 
-const SOCKET_URL = "http://192.168.0.101:3000";
-const HLS_BASE = "http://192.168.0.101:8080/live";
+const SOCKET_URL = "http://192.168.0.102:3000";
+const HLS_BASE = "http://192.168.0.102:8080/live";
 
 export default function Watch() {
   const { id } = useParams();
@@ -16,17 +16,21 @@ export default function Watch() {
   const chatRef = useRef(null);
   const socketRef = useRef(null);
   const hlsRef = useRef(null);
+  const muteTimerRef = useRef(null);
 
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [viewerCount, setViewerCount] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [muteSeconds, setMuteSeconds] = useState(0);
 
   const token = localStorage.getItem("token");
   const guestId = localStorage.getItem("guestId");
   const guestName = localStorage.getItem("guestName");
 
   const user = token ? jwtDecode(token) : null;
+  const isAdmin = user?.role === "ADMIN";
 
   useEffect(() => {
     if (!token && !guestId) navigate("/login");
@@ -35,9 +39,11 @@ export default function Watch() {
   useEffect(() => {
     loadStream();
     initSocket();
+
     return () => {
       socketRef.current?.disconnect();
       hlsRef.current?.destroy();
+      clearInterval(muteTimerRef.current);
     };
   }, []);
 
@@ -53,7 +59,13 @@ export default function Watch() {
       const url = `${HLS_BASE}/${res.data.stream_key}.m3u8`;
 
       if (Hls.isSupported()) {
-        const hls = new Hls({ lowLatencyMode: true });
+        const hls = new Hls({
+          lowLatencyMode: true,
+          liveSyncDurationCount: 1,
+          liveMaxLatencyDurationCount: 2,
+          maxBufferLength: 5,
+          maxMaxBufferLength: 10,
+        });
         hlsRef.current = hls;
         hls.loadSource(url);
         hls.attachMedia(videoRef.current);
@@ -82,7 +94,7 @@ export default function Watch() {
   }
 
   function send() {
-    if (!input.trim()) return;
+    if (muted || !input.trim()) return;
 
     socketRef.current.emit("chatMessage", {
       streamId: Number(id),
@@ -98,22 +110,58 @@ export default function Watch() {
   }
 
   function share() {
-    navigator.clipboard.writeText(window.location.href);
+    const url = window.location.href;
+
+    if (navigator.share) {
+      navigator
+        .share({
+          title: "Live Stream",
+          text: "Watch this stream:",
+          url: url,
+        })
+        .then(() => showToast())
+        .catch(() => {});
+      return;
+    }
+
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard
+        .writeText(url)
+        .then(() => showToast())
+        .catch(() => fallbackCopy(url));
+    } else {
+      fallbackCopy(url);
+    }
+  }
+
+  function fallbackCopy(text) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
+    showToast();
+  }
+
+  function showToast() {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }
 
   return (
     <>
-      <div className="min-h-screen bg-black text-white flex flex-col md:flex-row">
+      {/* 🔥 IMPORTANT CHANGE HERE */}
+      <div className="h-screen bg-black text-white flex flex-col md:flex-row overflow-hidden">
 
         {/* VIDEO SECTION */}
         <div className="flex-1 flex flex-col">
-
-          {/* NAVBAR */}
           <div className="flex justify-between items-center px-4 py-3 bg-black border-b border-neutral-800">
             <div className="text-sm truncate max-w-[60%]">
-              👤 {token ? user?.email : guestName}
+              👤 {token ? user?.name : guestName}
             </div>
 
             <div className="flex gap-2">
@@ -133,7 +181,6 @@ export default function Watch() {
             </div>
           </div>
 
-          {/* VIDEO WRAPPER */}
           <div className="w-full bg-black aspect-video">
             <video
               ref={videoRef}
@@ -145,21 +192,27 @@ export default function Watch() {
           </div>
         </div>
 
-        {/* CHAT SECTION */}
-        <div className="md:w-[400px] w-full flex flex-col bg-neutral-950 border-t md:border-t-0 md:border-l border-neutral-800">
+        {/* CHAT */}
+        {/* 🔥 IMPORTANT CHANGE HERE */}
+        <div className="md:w-[400px] w-full flex flex-col bg-neutral-950 border-t md:border-t-0 md:border-l border-neutral-800 min-h-0">
 
           <div className="p-3 border-b border-neutral-800 text-sm">
             👁 {viewerCount} watching
           </div>
 
+          {/* 🔥 IMPORTANT CHANGE HERE */}
           <div
             ref={chatRef}
-            className="flex-1 overflow-y-auto p-3 space-y-2"
+            className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2"
           >
             {messages.map((m) => (
               <div
                 key={m.id}
-                className="bg-neutral-900 p-2 rounded text-sm break-words"
+                className={`p-2 rounded text-sm ${
+                  m.deleted
+                    ? "bg-neutral-800 text-gray-400 italic"
+                    : "bg-neutral-900"
+                }`}
               >
                 <b
                   className={
@@ -180,14 +233,16 @@ export default function Watch() {
           <div className="p-2 flex gap-2 border-t border-neutral-800">
             <input
               value={input}
+              disabled={muted}
               onChange={(e) => setInput(e.target.value)}
               className="flex-1 px-3 py-2 rounded bg-neutral-800 text-sm"
-              placeholder="Type a message"
+              placeholder={muted ? "You are muted..." : "Type a message"}
               onKeyDown={(e) => e.key === "Enter" && send()}
             />
             <button
               onClick={send}
-              className="bg-blue-500 px-4 rounded text-sm"
+              disabled={muted}
+              className="px-4 rounded bg-blue-500 text-sm"
             >
               Send
             </button>
@@ -195,7 +250,6 @@ export default function Watch() {
         </div>
       </div>
 
-      {/* COPY TOAST */}
       {copied && (
         <div className="fixed bottom-6 right-6 bg-green-600 px-4 py-2 rounded shadow text-sm">
           Link copied ✓

@@ -8,19 +8,20 @@ dotenv.config({
 });
 
 async function bootstrap() {
+
   console.log('ENV JWT SECRET:', process.env.JWT_SECRET);
 
-  const app = await NestFactory.create(AppModule, {
-    logger: ['error', 'warn', 'log'], // remove verbose/debug
-  });
+  const app = await NestFactory.create(AppModule);
 
-  // 🔥 ENABLE CORS (THIS IS THE KEY FIX)
+  // 🔥 FIXED CORS (mobile safe)
   app.enableCors({
-    origin: true, // 🔥 allow ALL origins (DEV ONLY)
-    credentials: true,
+    origin: "*",                       // allow all origins
+    methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
+    allowedHeaders: "*",
+    credentials: false,                // IMPORTANT
   });
 
-  await app.listen(3000,"0.0.0.0");
+  await app.listen(3000, "0.0.0.0");    // allow mobile access
 }
 
 bootstrap();

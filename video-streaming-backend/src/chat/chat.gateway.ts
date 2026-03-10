@@ -44,7 +44,7 @@ export class ChatGateway
     try {
       const { token, guestId, guestName } = client.handshake.auth || {};
 
-      // ✅ Registered User
+      // Registered user
       if (token) {
         const secret = this.configService.get<string>('JWT_SECRET');
         if (!secret) throw new Error('JWT_SECRET missing');
@@ -53,16 +53,15 @@ export class ChatGateway
 
         client.data.user = {
           type: 'user',
-          email: decoded.email,
+          name: decoded.name,
           sub: decoded.sub,
           role: decoded.role,
         };
 
-        console.log('✅ User connected:', decoded.email);
         return;
       }
 
-      // ✅ Guest User
+      // Guest
       const finalGuestId = guestId || randomUUID();
       const finalGuestName =
         guestName && guestName.trim() !== ''
@@ -74,11 +73,7 @@ export class ChatGateway
         guestId: finalGuestId,
         name: finalGuestName,
       };
-
-      console.log('👤 Guest connected:', finalGuestName);
-
     } catch (err) {
-      console.log('❌ WS auth failed');
       client.disconnect();
     }
   }
@@ -120,8 +115,8 @@ export class ChatGateway
 
     const viewerKey = `stream:viewers:${streamId}`;
     await this.redis.sadd(viewerKey, viewerId.toString());
-    const count = await this.redis.scard(viewerKey);
 
+    const count = await this.redis.scard(viewerKey);
     this.server.to(`stream-${streamId}`).emit('viewerCount', count);
 
     const history = await this.redis.lrange(
@@ -137,7 +132,7 @@ export class ChatGateway
   }
 
   /* ======================
-     SEND CHAT MESSAGE
+     CHAT MESSAGE
   ====================== */
   @SubscribeMessage('chatMessage')
   async chatMessage(
@@ -150,23 +145,21 @@ export class ChatGateway
 
     if (!viewerId) return;
 
-    // 🔥 Check timed mute
     const muteKey = `stream:mute:${data.streamId}:${viewerId}`;
-    const isMuted = await this.redis.exists(muteKey);
 
-    if (isMuted) {
-      client.emit('muted', {
-        message: 'You are muted for 1 minute 30 seconds',
+    const ttl = await this.redis.ttl(muteKey);
+
+    // 🔥 If muted, send remaining seconds
+    if (ttl > 0) {
+      client.emit('youAreMuted', {
+        secondsLeft: ttl,
       });
       return;
     }
 
     const chat = {
       id: randomUUID(),
-      user:
-        user.type === 'user'
-          ? user.email
-          : user.name,
+      user: user.name,
       userId: viewerId,
       role:
         user.type === 'user'
@@ -178,7 +171,6 @@ export class ChatGateway
     };
 
     const key = `livechat:stream:${data.streamId}`;
-
     await this.redis.lpush(key, JSON.stringify(chat));
     await this.redis.ltrim(key, 0, 99);
 
@@ -188,7 +180,7 @@ export class ChatGateway
   }
 
   /* ======================
-     ADMIN DELETE MESSAGE
+     ADMIN DELETE
   ====================== */
   @SubscribeMessage('adminDeleteMessage')
   async deleteMessage(
@@ -218,7 +210,6 @@ export class ChatGateway
       await this.redis.rpush(key, ...updated);
     }
 
-    // 🔥 Instantly update frontend
     this.server
       .to(`stream-${data.streamId}`)
       .emit('chatMessageUpdated', {
@@ -240,16 +231,29 @@ export class ChatGateway
 
     const muteKey = `stream:mute:${data.streamId}:${data.userId}`;
 
-    // 90 seconds
     await this.redis.set(muteKey, '1', 'EX', 90);
 
-    this.server
-      .to(`stream-${data.streamId}`)
-      .emit('userMuted', { userId: data.userId });
+    // 🔥 Instantly notify muted user if connected
+    const sockets = await this.server
+      .in(`stream-${data.streamId}`)
+      .fetchSockets();
+
+    for (const s of sockets) {
+      const u = s.data.user;
+
+      if (!u) continue;
+
+      const id =
+        u.type === 'user' ? u.sub : u.guestId;
+
+      if (id?.toString() === data.userId.toString()) {
+        s.emit('youAreMuted', { secondsLeft: 90 });
+      }
+    }
   }
 
   /* ======================
-     ADMIN UNMUTE USER
+     ADMIN UNMUTE
   ====================== */
   @SubscribeMessage('adminUnmuteUser')
   async unmuteUser(
@@ -263,8 +267,19 @@ export class ChatGateway
     const muteKey = `stream:mute:${data.streamId}:${data.userId}`;
     await this.redis.del(muteKey);
 
-    this.server
-      .to(`stream-${data.streamId}`)
-      .emit('userUnmuted', { userId: data.userId });
+    const sockets = await this.server
+      .in(`stream-${data.streamId}`)
+      .fetchSockets();
+
+    for (const s of sockets) {
+      const u = s.data.user;
+
+      const id =
+        u.type === 'user' ? u.sub : u.guestId;
+
+      if (id?.toString() === data.userId.toString()) {
+        s.emit('userUnmuted');
+      }
+    }
   }
 }

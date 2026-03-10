@@ -23,7 +23,6 @@ export default function Login() {
 
       localStorage.removeItem("guestId");
       localStorage.removeItem("guestName");
-
       localStorage.setItem("token", token);
 
       const decoded = jwtDecode(token);
@@ -33,14 +32,15 @@ export default function Login() {
       } else {
         navigate("/streams");
       }
+
     } catch (err) {
+      console.error("Login error:", err);
       alert("Login failed");
-      console.error(err);
     }
   }
 
   /* ======================
-     JOIN AS GUEST (FINAL FIX)
+     JOIN AS GUEST (MOBILE SAFE)
   ====================== */
   async function joinAsGuest() {
     if (!guestName.trim()) {
@@ -51,33 +51,58 @@ export default function Login() {
     try {
       localStorage.removeItem("token");
 
-      const guestId = crypto.randomUUID();
+      // 🔥 SAFE UUID FOR ALL DEVICES
+      const guestId =
+        window.crypto?.randomUUID?.() ||
+        Math.random().toString(36).substring(2) +
+        Date.now().toString(36);
+
       localStorage.setItem("guestId", guestId);
       localStorage.setItem("guestName", guestName);
 
       const res = await api.get("/stream");
 
-      console.log("Streams:", res.data);
+      if (!res || !res.data) {
+        alert("API returned empty response");
+        return;
+      }
 
-      if (!res.data || res.data.length === 0) {
+      let streams = [];
+
+      if (Array.isArray(res.data)) {
+        streams = res.data;
+      } else if (Array.isArray(res.data.data)) {
+        streams = res.data.data;
+      } else {
+        alert("Unexpected API response");
+        return;
+      }
+
+      if (!streams.length) {
         alert("No streams available");
         return;
       }
 
-      const liveStream = res.data.find(
+      const liveStream = streams.find(
         (s) => s.status?.toUpperCase() === "LIVE"
       );
 
       const streamId = liveStream
         ? liveStream.id
-        : res.data[0].id;
+        : streams[0].id;
 
-      // 🔥 FORCE REDIRECT (No router issue)
-      window.location.href = `/watch/${streamId}`;
+      navigate(`/watch/${streamId}`);
 
     } catch (err) {
-      console.error("Stream fetch error:", err);
-      alert("Failed to load streams");
+      console.error("Guest login error:", err);
+
+      if (err.response) {
+        alert("Server error: " + err.response.status);
+      } else if (err.request) {
+        alert("Cannot connect to backend");
+      } else {
+        alert("JS error: " + err.message);
+      }
     }
   }
 
@@ -87,7 +112,7 @@ export default function Login() {
 
         <h2 className="text-xl mb-4 text-center">Login</h2>
 
-        {/* EMAIL LOGIN */}
+        {/* Email Login */}
         <input
           className="w-full p-2 mb-2 bg-zinc-800 rounded"
           placeholder="Email"
@@ -112,7 +137,7 @@ export default function Login() {
           ─── OR ───
         </div>
 
-        {/* GUEST LOGIN */}
+        {/* Guest Login */}
         <input
           className="w-full p-2 mb-2 bg-zinc-800 rounded"
           placeholder="Enter Guest Name"

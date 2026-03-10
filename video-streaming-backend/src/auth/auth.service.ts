@@ -40,7 +40,7 @@ export class AuthService {
 
     // 🔑 INCLUDE ROLE IN JWT
     const payload = {
-      email: user.email,
+      name: user.name,
       sub: user.id,
       role: user.role, // 👈 THIS UNLOCKS ADMIN FEATURES
     };
